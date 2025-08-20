@@ -1,20 +1,19 @@
 from langgraph.graph import StateGraph, START, END
 from langchain_tavily import TavilySearch
 from typing import TypedDict
-from rich.console import Console
 from langgraph.checkpoint.sqlite import SqliteSaver
-import sqlite3
 import model
-import prompts
-
+import prompts  
+from dotenv import load_dotenv
+import sqlite3
+load_dotenv()
 
 # ------------------------------ Loading models ------------------------------ #
 llm = model.ChatOpenAIModel()
 tavily = TavilySearch()
-console = Console()
-sqlite_conn = sqlite3.connect("checkpoint.sqlite")
-memory = SqliteSaver(conn=sqlite_conn)
-
+sqlite_conn = sqlite3.connect("checkpoint.sqlite", check_same_thread=False)
+memory = SqliteSaver(sqlite_conn)
+config = {"configurable" : {"thread_id" : 1}}
 # ---------------------- Defining the state of the Agent --------------------- #
 class AgentState(TypedDict):
     query : str 
@@ -23,66 +22,96 @@ class AgentState(TypedDict):
     summary : str
     critique : str
     decision : str
-    revise_count : int = 0
+    revise_count : int
     
     
 # ----------------------------- Defining Nodes ------------------------------- #
 
-def planner_node(state : AgentState) -> AgentState:
-    """Plans what to research for the given topic.
-    Args : AgentState -> CUrrent state of the agent."""
+def planner_node(state: AgentState) -> AgentState:
+    """Plans what to research for the given topic, incorporating critique if it exists."""
     
     query = state['query']
-    prompt = prompts.planner_node_template.format_prompt(topic=query)
+    
+    # --- THIS IS THE FIX ---
+    # Use .get() to safely access the 'critique' key.
+    # If it doesn't exist (like on the first run), it will use the default string.
+    critique = state.get('critique', 'No critique has been provided yet.')
+    
+    prompt = prompts.planner_node_template.format_prompt(
+        topic=query,
+        critic=critique
+    )
     
     result = llm.invoke(prompt)
     
-    return {'plan' : result.content}
+    return {'plan': result.content}
 
 
 def research_node(state : AgentState) -> AgentState:
     """Researches the 'plan' from the state.
        Uses tavily research tool for web searches.
        Args : AgentState -> CUrrent state of the agent."""
-       
+    print("\n----- Researching Content -----\n")   
     plan = state['plan']
     queries = [line.strip() for line in plan.strip().split('\n') if line.strip()]
-    
+        
     final_results = []
     
     for query in queries:
         result = tavily.invoke(query)
-        final_results.extend(result)
+        final_results.append(result)
+
         
     urls = set()
     formatted_results = []
+
+# This loop goes through the list of API responses (you might only have one)
+    for api_response in final_results:
     
-    for res in final_results:
-        if res['url'] not in urls:
-            formatted_results.append(f"URL : {res['url']}\nContent : {res['content']}")
-            urls.add(res['url'])
+    # Safely get the list of search results from inside the response
+        search_results = api_response.get('results', [])
+    
+    # Now, loop directly through each individual search result
+        for result_item in search_results:
+        # 'result_item' is now one of the dictionaries with 'url' and 'content'
+        
+            url = result_item.get('url') # Safely get the url
+        
+        # Check if we have a URL and if we haven't seen it before
+            if url and url not in urls:
+                content = result_item.get('content', 'No content provided.')
             
+            # Append the formatted string
+                formatted_results.append(f"URL : {url}\nContent : {content}")
+            
+            # Add the URL to our set to avoid duplicates
+                urls.add(url)
+
+           
+    if not formatted_results:
+        return {"research": "No relevant information was found on the web for the given research plan."} 
+           
     return {'research' : "\n\n".join(formatted_results)}
 
 
 def summarize_node(state : AgentState) -> AgentState:
     """Summarizes the topic based on the topic and the query results.
        Args : AgentState -> CUrrent state of the agent."""
-    
+    print("----- Summarizing Content -----")
     topic = state['query']
     web_results = state['research']
     
     prompt = prompts.summary_node_template.format_prompt(web_results=web_results, topic=topic)
     
     result = llm.invoke(prompt)
-    
+    print(f"\n----- Summary : {result.content}\n")
     return {'summary' : result.content}
 
 def critique_node(state : AgentState) -> AgentState:
     """Critizes and cross questions the summary to generate the best output.
        Decides whether to revise the content or output to user.
        Args : AgentState -> CUrrent state of the agent."""
-       
+    print("----- Critiquing Content -----")   
     topic = state['query']
     summary = state['summary']
     
@@ -90,7 +119,7 @@ def critique_node(state : AgentState) -> AgentState:
     
     result = llm.invoke(prompt)
     
-    print(f"Critique : {result.content}")    
+    print(f"\nCritique : {result.content}\n")    
     
     if "revise" in result.content.strip().lower():
         return {"critique": result.content, "decision": "revise"}
@@ -135,3 +164,7 @@ graph.add_conditional_edges(
 )
 
 app = graph.compile(checkpointer=memory)
+
+result = app.invoke({'query' : "Perplexity AI in India", 'revise_count' : 0}, config=config)
+print("\n\n----- Final Summary -----\n\n")
+print(result['summary'])
