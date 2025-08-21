@@ -30,7 +30,7 @@ This agent is built with a modern stack of AI and Python libraries:
 Follow these steps to get the agent running on your local machine.
 
 1. Clone the Repository
-`git clone https://github.com/OmPatilGit/AI-Agents`
+`git clone https://github.com/OmPatilGit/ReAct-Agent.git`
 `cd ReAct-Agent`
 
 2. Create a Virtual Environment
@@ -80,3 +80,4 @@ This project is currently a powerful terminal-based application. The next major 
 **Desktop Application**: Exploring options for a native desktop UI.
 
 Stay tuned for updates!
+
